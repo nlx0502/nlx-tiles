@@ -1,0 +1,15 @@
+{
+  "name": "NLX Tiles",
+  "short_name": "NLX Tiles",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#050508",
+  "theme_color": "#050508",
+  "icons": [
+    {
+      "src": "icon.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}
