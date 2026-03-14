@@ -273,20 +273,7 @@ img.lc-cover{display:block;}
   <div id="loading-text">Analyse audio en cours…</div>
 </div>
 
-<!-- ══ MODAL AJOUT ══ -->
-<div class="screen" id="add-modal">
-  <div class="modal-box">
-    <div class="modal-title">AJOUTER UNE MUSIQUE</div>
-    <div class="modal-status" id="modal-status">Analyse en cours…</div>
-    <div class="modal-progress-wrap"><div class="modal-progress-bar" id="modal-progress"></div></div>
-    <input type="text" class="lm-input" id="loc-title" placeholder="Titre du morceau">
-    <input type="text" class="lm-input" id="loc-artist" placeholder="Artiste (optionnel)">
-    <div class="modal-btns">
-      <button class="btn btn-secondary" id="modal-cancel">ANNULER</button>
-      <button class="btn btn-primary" id="modal-save" disabled>AJOUTER</button>
-    </div>
-  </div>
-</div>
+
 
 <!-- ══ GAME OVER ══ -->
 <div class="screen" id="gameover-screen">
@@ -376,30 +363,79 @@ img.lc-cover{display:block;}
 // ═══════════════════════════════════════════════════════════════════════════
 
 // ── LEVELS ────────────────────────────────────────────────────────────────
-const BUILTIN_LEVELS = [
-  {id:'b1',name:'Reine',artist:'Dadju',diffColor:'#06D6A0',accent:'#06D6A0',audioUrl:'./musiques/1.mp3',beatmapUrl:'./musiques/beatmap_1.json',cover:'./musiques/cover1.jpg'},
-  {id:'b2',name:'DÁKITI',artist:'Bad Bunny',diffColor:'#FFBE0B',accent:'#FFBE0B',audioUrl:'./musiques/2.mp3',beatmapUrl:'./musiques/beatmap_2.json',cover:'./musiques/cover2.jpg'},
-  {id:'b3',name:'Changer',artist:'GIMS',diffColor:'#FB5607',accent:'#FB5607',audioUrl:'./musiques/3.mp3',beatmapUrl:'./musiques/beatmap_3.json',cover:'./musiques/cover3.jpg'},
-  {id:'b4',name:'Just Keep Watching',artist:'Tate McRae',diffColor:'#FB5607',accent:'#FB5607',audioUrl:'./musiques/4.mp3',beatmapUrl:'./musiques/beatmap_4.json',cover:'./musiques/cover4.jpg'}
-];
-let CUSTOM_LEVELS = [];
-let ALL_LEVELS = [...BUILTIN_LEVELS]; // rebuilt when custom added
-let currentLevel = BUILTIN_LEVELS[0];
+// Levels are loaded dynamically from ./musiques/
+// Discovery: try beatmap_1.json, beatmap_2.json... up to 20, then stop on first 404.
+// Each beatmap JSON contains title, artist, bpm, offset, duration, pattern.
+let BUILTIN_LEVELS = [];
+let ALL_LEVELS = [];
+let currentLevel = null;
+
+async function discoverLevels() {
+  const ACCENT_COLORS = [
+    '#06D6A0','#FFBE0B','#FB5607','#FF006E','#8338EC','#4CC9F0',
+    '#F72585','#7209B7','#3A0CA3','#4361EE','#4CC9F0','#06D6A0'
+  ];
+  let idx = 1;
+  while (idx <= 50) {
+    const beatmapUrl = `./musiques/beatmap_${idx}.json`;
+    try {
+      const r = await fetch(beatmapUrl);
+      if (!r.ok) break; // 404 = no more levels
+      const data = await r.json();
+      const accent = ACCENT_COLORS[(idx-1) % ACCENT_COLORS.length];
+      BUILTIN_LEVELS.push({
+        id: `b${idx}`,
+        name:   data.title  || `Musique ${idx}`,
+        artist: data.artist || 'Inconnu',
+        bpm:    data.bpm    || 120,
+        offset: data.offset || 0,
+        diffColor: accent,
+        accent:    accent,
+        audioUrl:     `./musiques/${idx}.mp3`,
+        beatmapUrl:   beatmapUrl,
+        cover:        `./musiques/cover${idx}.jpg`,
+        _baseData:    data,  // full beatmap data cached
+      });
+      idx++;
+    } catch(e) {
+      break;
+    }
+  }
+  ALL_LEVELS = [...BUILTIN_LEVELS];
+  currentLevel = BUILTIN_LEVELS[0] || null;
+}
 let currentDiff  = 'NORMAL';
 let hardcoreMode = false; // separate from difficulty
 
 // ── DIFFICULTY: speed only, timing never changes ──
 // Lower speeds = tiles fall slower but still hit on beat (just more time to react).
 // The beatmap timestamps are absolute seconds from audio start — unchanged by diff.
+// ── DIFFICULTY PARAMETERS ────────────────────────────────────────────────
+// speedMult:       tile fall speed multiplier
+// sliderChance:    prob. a canSlider event → slider tile
+// diagChance:      prob. a strong beat → diagonal slider (HARD+ only)
+// doubleChance:    prob. a strong/snare beat spawns 2 simultaneous tiles
+// restThreshold:   events with intensity < this are skipped entirely
+// subThreshold:    8th notes require intensity ≥ this
+// sub16Threshold:  16th notes require intensity ≥ this (INSANE)
+// densityBoost:    at intensity ≥ this, unlock all 8ths regardless of subThreshold
+// sliderFreq:      extra slider chance boost (on top of sliderChance) for HARD+
 const DIFF_PARAMS = {
-  EASY:   {speedMult:0.72, sliderChance:.10, diagChance:0,   doubleChance:.00},
-  NORMAL: {speedMult:0.92, sliderChance:.16, diagChance:0,   doubleChance:.07},
-  HARD:   {speedMult:1.18, sliderChance:.23, diagChance:.08, doubleChance:.14},
-  INSANE: {speedMult:1.55, sliderChance:.28, diagChance:.16, doubleChance:.22},
+  EASY:   {speedMult:0.62, sliderChance:.10, diagChance:0,   doubleChance:.00,
+           restThreshold:.22, subThreshold:99,  sub16Threshold:99,
+           densityBoost:0,    sliderFreq:0},
+  NORMAL: {speedMult:0.85, sliderChance:.32, diagChance:0,   doubleChance:.18,
+           restThreshold:.10, subThreshold:99,  sub16Threshold:99,
+           densityBoost:0,    sliderFreq:.12},
+  HARD:   {speedMult:1.45, sliderChance:.62, diagChance:.16, doubleChance:.78,
+           restThreshold:.04, subThreshold:.25, sub16Threshold:99,
+           densityBoost:.45,  sliderFreq:.30},
+  INSANE: {speedMult:2.05, sliderChance:.72, diagChance:.25, doubleChance:.96,
+           restThreshold:.02, subThreshold:.10, sub16Threshold:.28,
+           densityBoost:.22,  sliderFreq:.42},
 };
-const BASE_SPEED = 460; // px/s at speedMult=1.0
-// Diagonals only in HARD+
-const DIAG_MIN_GAP = {EASY:999,NORMAL:999,HARD:14,INSANE:9};
+const BASE_SPEED = 460;
+const DIAG_MIN_GAP = {EASY:9999,NORMAL:9999,HARD:10,INSANE:5};
 
 // ── COLORS ────────────────────────────────────────────────────────────────
 const DARK_COLORS=['#E8447A','#F0A500','#00C896','#9B59D4'];
@@ -470,7 +506,11 @@ function resize(){const r=wrap.getBoundingClientRect();canvas.width=r.width;canv
 resize();window.addEventListener('resize',resize);
 function timingY(){return wrapH-tileH;}
 function pxPerSec(){return BASE_SPEED*DIFF_PARAMS[currentDiff].speedMult;}
-function fallTime(){return wrapH/pxPerSec();}
+function fallTime(){
+  // Tile spawns at y=-tileH, judgment when center (y+tileH/2) = timingY = wrapH-tileH
+  // Travel distance = (wrapH-tileH) - tileH/2 - (-tileH) = wrapH - tileH/2
+  return (wrapH - tileH * 0.5) / pxPerSec();
+}
 
 // ── SCHEDULER (sync-safe) ─────────────────────────────────────────────────
 // KEY: tile timestamps are absolute seconds from audio start.
@@ -494,8 +534,10 @@ function fillQueue(){
     if(spawnAc>horizon)break;
     patIdx++;
     if(e.rest)continue;
-    patternQueue.push({acTime:spawnAc,col:e.col,type:e.type||'tap',col2:e.col2||-1,double:e.double||false});
-    if(e.double&&e.col2>=0)patternQueue.push({acTime:spawnAc,col:e.col2,type:'tap',col2:-1,double:false});
+    // Compute slider length in pixels from note duration
+    const slLen = (e.sliderSec||0) > 0 ? (e.sliderSec * pxPerSec()) : 0;
+    patternQueue.push({acTime:spawnAc,col:e.col,type:e.type||'tap',col2:e.col2||-1,double:e.double||false,sliderLen:slLen});
+    if(e.double&&e.col2>=0)patternQueue.push({acTime:spawnAc,col:e.col2,type:'tap',col2:-1,double:false,sliderLen:0});
     const ms=(audioStartAcTime+e.time-ac.currentTime)*1000;
     if(ms>0)setTimeout(()=>{if(gameRunning)timingLinePulse=1;},ms);
     else timingLinePulse=1;
@@ -510,36 +552,66 @@ function checkSongEnd(){
 }
 
 // ── SPAWN ─────────────────────────────────────────────────────────────────
+// Max simultaneous tiles per difficulty:
+//   EASY/NORMAL: 2  (one tile per pair of columns, calm)
+//   HARD:        3  (two taps + one slider possible)
+//   INSANE:      4  (all 4 columns can be active — full density)
+// Sliders/diagonals: while ACTIVE (held), they still count toward the cap
+// BUT a completed slider scrolling away does NOT block spawning.
+const MAX_TILES = {EASY:2, NORMAL:2, HARD:3, INSANE:4};
 function processSpawnQueue(){
   if(!gameRunning)return;
   const now=getAC().currentTime;
-  // Rebuild blocked cols: ANY slider/diagonal tile that is alive blocks its col
+  const maxAlive = MAX_TILES[currentDiff] || 2;
+
+  // Rebuild blocked cols from ACTIVE (held) sliders only
   blockedCols.clear();
   for(const t of tiles){
-    if((t.type==='slider'||t.type==='diagonal')&&!t.dying){
+    if((t.type==='slider'||t.type==='diagonal')&&t.sliderActive&&!t.dying){
       blockedCols.add(t.col);
       if(t.type==='diagonal')blockedCols.add(Math.round(t.diagEndX/colW));
     }
   }
-  // Count all alive (not dead, not fully gone) tiles
-  const aliveTiles=tiles.filter(t=>!t.dying&&!t.collapsing);
+
+  // Alive = tiles the player still needs to tap or that are falling
+  // Excludes: tiles that are dying (already hit/missed), completed sliders scrolling away
+  const aliveTiles=tiles.filter(t=>!t.dying&&!t.collapsing&&!(t.sliderDone&&!t.sliderActive));
+
   while(patternQueue.length&&patternQueue[0].acTime<=now){
     const e=patternQueue.shift();
     if(blockedCols.has(e.col))continue;
     if(e.type==='diagonal'&&e.col2>=0&&blockedCols.has(e.col2))continue;
-    // MAX 2 tiles alive simultaneously (including active sliders)
-    if(aliveTiles.length>=2)continue;
+    if(aliveTiles.length>=maxAlive)continue;
     if(aliveTiles.some(t=>t.col===e.col))continue;
-    const tile=makeTile(e.col,e.type,e.col2);
+    // Compensate for late spawn: if AC time is past the intended spawn moment,
+    // the tile would already have traveled some distance. Start it pre-advanced.
+    const lateness = now - e.acTime;  // seconds past intended spawn
+    const tile=makeTile(e.col,e.type,e.col2,e.sliderLen);
+    if(lateness > 0) tile.y = -tileH + lateness * pxPerSec();
     tiles.push(tile);
     aliveTiles.push(tile);
   }
 }
 
-function makeTile(col,type='tap',col2=-1){
+function makeTile(col,type='tap',col2=-1,sliderLenOverride=0){
   const isHold=type==='slider'||type==='diagonal';
-  const sl=isHold?tileH*(2.2+Math.random()*1.3):0;
-  return {id:Math.random(),col,type,col2,x:col*colW,y:-tileH,w:colW,h:tileH,sliderLen:sl,hit:false,dying:false,dyingT:0,glow:0,opacity:1,sliderActive:false,sliderProgress:0,sliderDone:false,hitY:0,diagStartX:col*colW,diagEndX:col2>=0?col2*colW:col*colW,collapseVx:0,collapseVy:0,collapseGravity:0,collapseRot:0,collapseRotV:0,collapseAlpha:1,collapsing:false};
+  // sliderLen: use the music-derived length if provided, else default
+  // Music-derived: noteDuration(sec) * pxPerSec = pixels
+  // Clamped between 2*tileH and 6*tileH
+  let sl=0;
+  if(isHold){
+    if(sliderLenOverride>0){
+      sl=Math.max(tileH*1.8, Math.min(tileH*6, sliderLenOverride));
+    } else {
+      sl=tileH*(2.2+Math.random()*1.2);
+    }
+  }
+  return {id:Math.random(),col,type,col2,x:col*colW,y:-tileH,w:colW,h:tileH,sliderLen:sl,
+          hit:false,dying:false,dyingT:0,glow:0,opacity:1,
+          sliderActive:false,sliderProgress:0,sliderDone:false,hitY:0,
+          diagStartX:col*colW,diagEndX:col2>=0?col2*colW:col*colW,
+          collapseVx:0,collapseVy:0,collapseGravity:0,collapseRot:0,
+          collapseRotV:0,collapseAlpha:1,collapsing:false};
 }
 
 // ── PARTICLES ─────────────────────────────────────────────────────────────
@@ -819,14 +891,23 @@ function loop(ts){
     if(t.collapsing){t.collapseVy+=t.collapseGravity*rawDt;t.x+=t.collapseVx*rawDt;t.y+=t.collapseVy*rawDt;t.collapseRot+=t.collapseRotV*rawDt;t.collapseAlpha=Math.max(0,1-dyingProgress*1.5);}
     if(!isDying&&(t.type==='slider'||t.type==='diagonal')&&t.sliderActive&&!t.sliderDone){
       const traveled=t.y-t.hitY;t.sliderProgress=Math.min(1,traveled/t.sliderLen);
-      // diagonal x stays fixed (diagEndX) — only fill progress moves
-      if(t.sliderProgress>=1||t.y>wrapH+tileH*.4){t.sliderDone=true;t.sliderActive=false;t.dying=true;t.dyingT=0;onSliderDone(t);}
+      // Check: if finger was lifted (not in activeSliders), immediately fail the slider
+      const stillHeld=Object.values(activeSliders).includes(t);
+      if(!stillHeld){
+        // Finger lifted: fail slider
+        t.sliderActive=false;
+        if(t.sliderProgress<0.45){t.dying=true;t.dyingT=0;killMiss(t,true);}
+        else{t.sliderDone=true;t.dying=true;t.dyingT=0;showJudgement(JUDGEMENTS[3]);score+=8;combo++;maxCombo=Math.max(maxCombo,combo);updateHUD();showComboPop();}
+      } else if(t.sliderProgress>=1||t.y>wrapH+tileH*.4){
+        t.sliderDone=true;t.sliderActive=false;t.dying=true;t.dyingT=0;onSliderDone(t);
+      }
     }
     if(t.type==='diagonal')drawDiagSlider(t);
     else if(t.type==='slider')drawSliderTile(t);
     else drawTapTile(t);
   }
-  tiles.forEach(t=>{if(!t.hit&&!t.dying&&t.y+t.h/2>wrapH+tileH*.4)killMiss(t);});
+  // Miss: when the tap zone of the tile has passed the timing line by >1 tileH
+tiles.forEach(t=>{if(!t.hit&&!t.dying&&t.type==='tap'&&t.y+t.h/2>timingY()+tileH*1.2)killMiss(t);});
   tiles=tiles.filter(t=>!(t.collapsing&&(t.y>wrapH+tileH*2||t.collapseAlpha<=0))&&!(t.dying&&t.dyingT>=1)&&t.y<wrapH+tileH*3);
   updateParticles();animId=requestAnimationFrame(loop);
 }
@@ -872,6 +953,31 @@ function onTouchEnd(tid){
   t.sliderActive=false;
   if(t.sliderProgress<0.45){t.dying=true;t.dyingT=0;killMiss(t,true);}
   else{t.sliderDone=true;t.dying=true;t.dyingT=0;showJudgement(JUDGEMENTS[3]);score+=8;combo++;maxCombo=Math.max(maxCombo,combo);updateHUD();showComboPop();}
+}
+function onTouchMove(cx,cy,tid){
+  // For diagonal sliders: validate that finger tracks the body direction.
+  // The diagonal body spans from diagStartX (col A) to diagEndX (col B).
+  // We require the finger to stay within ±1 column of the slider body.
+  const t=activeSliders[tid];
+  if(!t||t.sliderDone||!t.sliderActive) return;
+  const rect=wrap.getBoundingClientRect();
+  const fx=cx-rect.left;
+  if(t.type==='diagonal'){
+    // Compute expected x range of the body at current sliderProgress
+    const prog=t.sliderProgress;
+    const bodyStartX=t.diagStartX;
+    const bodyEndX  =t.diagEndX;
+    const lo=Math.min(bodyStartX,bodyEndX)-colW*0.5;
+    const hi=Math.max(bodyStartX,bodyEndX)+colW*1.5;
+    if(fx<lo||fx>hi){
+      // Finger left the diagonal zone → cancel
+      delete activeSliders[tid];
+      t.sliderActive=false;
+      if(t.sliderProgress<0.45){t.dying=true;t.dyingT=0;killMiss(t,true);}
+      else{t.sliderDone=true;t.dying=true;t.dyingT=0;showJudgement(JUDGEMENTS[3]);score+=8;combo++;maxCombo=Math.max(maxCombo,combo);updateHUD();showComboPop();}
+    }
+  }
+  // Regular sliders: no position constraint, just holding is enough
 }
 function onSliderDone(t){
   burst(t.x+t.w*.5,wrapH-tileH/2,t.type==='diagonal'?'diag':t.col,32);
@@ -926,19 +1032,31 @@ async function startGame(){
     catch(e){alert('Impossible de charger '+currentLevel.audioUrl);showLoading(false);return;}
   }
 
-  // Load/build beatmap
+  // Load/build beatmap for current difficulty
   const cacheKey='beatmap_'+currentDiff;
   if(!currentLevel[cacheKey]){
-    if(currentLevel.beatmapUrl){
-      showLoading(true,'Chargement du niveau…');
-      try{const r=await fetch(currentLevel.beatmapUrl);if(r.ok){const base=await r.json();currentLevel[cacheKey]=adaptBeatmap(base,currentDiff);}}
-      catch(e){}
+    showLoading(true,'Chargement du niveau…');
+    // Use pre-cached full data if available
+    if(currentLevel._baseData){
+      currentLevel[cacheKey]=adaptBeatmap(currentLevel._baseData, currentDiff);
+    } else if(currentLevel.beatmapUrl){
+      try{
+        const r=await fetch(currentLevel.beatmapUrl);
+        if(r.ok){
+          const base=await r.json();
+          currentLevel._baseData=base;
+          // Update name/artist from JSON metadata
+          if(base.title&&base.title!==currentLevel.name) currentLevel.name=base.title;
+          if(base.artist&&base.artist!==currentLevel.artist) currentLevel.artist=base.artist;
+          if(base.bpm) currentLevel.bpm=base.bpm;
+          if(base.offset!==undefined) currentLevel.offset=base.offset;
+          currentLevel[cacheKey]=adaptBeatmap(base, currentDiff);
+        }
+      }catch(e){console.warn('beatmap load failed',e);}
     }
     if(!currentLevel[cacheKey]){
-      showLoading(true,'Analyse musicale en cours…');
-      const result=await analyseAudioInBrowser(currentLevel.audioBuffer);
-      currentLevel.bpm=result.bpm;currentLevel.offset=result.offset;
-      currentLevel[cacheKey]=adaptBeatmap(result,currentDiff);
+      // Fallback: generate empty pattern
+      currentLevel[cacheKey]=[];
     }
   }
   customPattern=currentLevel[cacheKey];
@@ -1050,15 +1168,9 @@ async function analyseAudioInBrowser(audioBuffer){
   }
 
   // Show progress steps
-  const modal=document.getElementById('add-modal');
-  const modalOpen=modal&&modal.style.display!=='none';
-  const progEl=modalOpen?document.getElementById('modal-progress'):null;
-  const statEl=modalOpen?document.getElementById('modal-status'):null;
   const ltEl=document.getElementById('loading-text');
   function setP(p,msg){
-    if(progEl) progEl.style.width=p+'%';
-    if(statEl) statEl.textContent=msg;
-    if(!modalOpen&&ltEl){ ltEl.textContent=msg; ltEl.style.display='block'; }
+    if(ltEl){ ltEl.textContent=msg; ltEl.style.display='block'; }
   }
 
   setP(10,'Analyse bandes de fréquences (basses)…');
@@ -1146,7 +1258,177 @@ async function analyseAudioInBrowser(audioBuffer){
   return {bpm,offset,pattern};
 }
 
-// (adaptBeatmap now combined into buildPatternFromOnsets section above)
+// ── ADAPT BEATMAP TO DIFFICULTY ──────────────────────────────────────────────
+// Transforms the raw musical event list → game tile sequence.
+// KEY INVARIANT: tile.time is ALWAYS the raw beat time from JSON.
+//
+// Design philosophy:
+//   Every tile must represent a REAL musical moment.
+//   Difficulty = how many of those moments you have to play + how fast.
+//   HARD feels like sight-reading a piano score.
+//   INSANE feels like playing a virtuoso transcription.
+function adaptBeatmap(base, diff) {
+  const P = DIFF_PARAMS[diff];
+  const events = Array.isArray(base) ? base : (base.pattern || []);
+  if(!events.length) return [];
+
+  const minDiag = DIAG_MIN_GAP[diff] || 9999;
+  const out=[], usedTimes=new Set();
+  let lastCol=-1, diagGap=0, prevType='tap', prevDbl=false;
+
+  // ── Column helpers ──────────────────────────────────────────────────────
+  function jumpCol(last){
+    if(last<0) return Math.floor(Math.random()*4);
+    const far=[0,1,2,3].filter(c=>Math.abs(c-last)>=2);
+    return far.length?far[Math.floor(Math.random()*far.length)]:3-last;
+  }
+  function stepCol(last){
+    if(last<0) return Math.floor(Math.random()*4);
+    return Math.max(0,Math.min(3,last+(Math.random()<.5?-1:1)));
+  }
+  function freeCol(last){
+    if(last<0) return Math.floor(Math.random()*4);
+    let c,n=0; do{c=Math.floor(Math.random()*4);n++;}while(n<20&&c===last);
+    return c;
+  }
+  function mirrorCol(last,sub){
+    // ping-pong for hihat streams
+    const m={0:3,1:2,2:1,3:0};
+    if(sub===0.25) return Math.max(0,last-1);
+    if(sub===0.75) return Math.min(3,last+1);
+    return m[last]??freeCol(last);
+  }
+
+  for(const e of events){
+    const sub=(e.beat||0)%1;
+    const intens=e.intensity||0;
+    const isQ=sub===0;
+    const isDense=intens>=P.densityBoost&&P.densityBoost>0;
+
+    // ── Rest handling ──────────────────────────────────────────────────────
+    if(e.rest){
+      if(intens<P.restThreshold) out.push({time:e.time,rest:true});
+      diagGap++; continue;
+    }
+
+    // ── Subdivision filter ─────────────────────────────────────────────────
+    // EASY: only quarter beats with strong content
+    if(diff==='EASY'){
+      if(!isQ) continue;
+      if(!e.isKick&&!e.isSnare&&!(e.isMelody&&intens>0.45)) continue;
+      if(intens<P.restThreshold) continue;
+    }
+    // NORMAL: all quarters, any musical content
+    else if(diff==='NORMAL'){
+      if(!isQ) continue;
+      if(intens<P.restThreshold) continue;
+      if(!e.isKick&&!e.isSnare&&!e.isMelody&&!e.isHihat&&!e.isVocal) continue;
+    }
+    // HARD: quarters always; 8ths when section is energetic; NO 16ths
+    else if(diff==='HARD'){
+      if(sub===0.25||sub===0.75) continue;
+      if(sub===0.5){
+        // 8th: include if (a) dense section OR (b) real musical hit above threshold
+        const realHit=e.isKick||e.isSnare||e.isMelody||e.isHihat||e.isVocal;
+        if(!realHit) continue;
+        if(!isDense&&intens<P.subThreshold) continue;
+      }
+      if(intens<P.restThreshold) continue;
+    }
+    // INSANE: ALL subdivisions that have real musical content
+    else if(diff==='INSANE'){
+      if(sub===0.25||sub===0.75){
+        if(!isDense&&intens<P.sub16Threshold) continue;
+        if(!e.isKick&&!e.isSnare&&!e.isMelody&&!e.isHihat&&!e.isVocal) continue;
+      }
+      if(sub===0.5&&!isDense&&intens<P.subThreshold) continue;
+      if(intens<P.restThreshold) continue;
+    }
+
+    // Deduplicate (same timestamp can appear from multiple analysis passes)
+    const tk=Math.round(e.time*1000);
+    if(usedTimes.has(tk)) continue;
+    usedTimes.add(tk);
+
+    // ── Musical column selection ───────────────────────────────────────────
+    // Kick/snare accent → jump (backbeat drama)
+    // Melody/vocal      → stepwise (musical phrase continuity)
+    // Hihat sub-beat    → mirror/alternate (rhythmic bounce)
+    let col;
+    if(e.isStrong||e.isSnare)         col=jumpCol(lastCol);
+    else if(e.isKick&&isQ)            col=jumpCol(lastCol);
+    else if(e.isMelody||e.isVocal)    col=stepCol(lastCol);
+    else if(e.isHihat&&!isQ)          col=mirrorCol(lastCol,sub);
+    else                              col=freeCol(lastCol);
+
+    diagGap++;
+    const rnd=Math.random();
+    let type='tap';
+
+    // ── Diagonal (HARD+ only, on strong accents) ───────────────────────────
+    const canDiag=diagGap>=minDiag&&(diff==='HARD'||diff==='INSANE')
+                  &&(e.isStrong||e.isSnare)&&isQ&&prevType!=='diagonal';
+    if(canDiag&&rnd<P.diagChance){ type='diagonal'; diagGap=0; }
+
+    // ── Slider (on ANY canSlider event — held notes in the music) ──────────
+    // Higher chance for longer notes (vibrato, held chords, vocal phrases)
+    else if(e.canSlider&&isQ&&prevType!=='slider'&&prevType!=='diagonal'){
+      const dur=e.noteDuration||0;
+      // Short notes: base chance. Long notes (vibrato, phrase): high chance.
+      const bonus=Math.min(0.35, dur*0.12);
+      const chance=P.sliderChance+bonus+P.sliderFreq;
+      if(rnd<chance) type='slider';
+    }
+    // HARD/INSANE: even non-quarter sliders on long vocal/melody notes
+    else if(e.canSlider&&!isQ&&(diff==='HARD'||diff==='INSANE')
+            &&(e.noteDuration||0)>0.3
+            &&prevType!=='slider'&&prevType!=='diagonal'){
+      if(rnd<P.sliderFreq) type='slider';
+    }
+
+    // ── Double notes ─────────────────────────────────────────────────────────
+    // Two tiles at the same time = big musical moment (downbeat, chorus hit)
+    // HARD: strong kicks + snares → doublet
+    // INSANE: dense 16th streams and nearly all kicks → doublet walls
+    let dbl=false,col2=-1;
+    const wantDbl = type==='tap' && !prevDbl && (
+      (e.isStrong  && rnd<P.doubleChance) ||
+      (e.isSnare   && rnd<P.doubleChance*0.85) ||
+      (e.isKick&&diff==='INSANE' && rnd<P.doubleChance*0.65) ||
+      (isDense&&diff==='INSANE'&&sub===0 && rnd<P.doubleChance*0.55) ||
+      // HARD dense section: doublets on strong beats
+      (isDense&&diff==='HARD'&&(e.isStrong||e.isSnare) && rnd<P.doubleChance*0.70)
+    );
+    if(wantDbl){
+      // INSANE: prefer max spread (col 0+3 or 1+2)
+      const farOpts=diff==='INSANE'
+        ?[0,1,2,3].filter(c=>Math.abs(c-col)>=2)
+        :[0,1,2,3].filter(c=>c!==col);
+      const pool=farOpts.length?farOpts:[0,1,2,3].filter(c=>c!==col);
+      if(pool.length){dbl=true;col2=pool[Math.floor(Math.random()*pool.length)];}
+    }
+
+    // ── Diagonal target ─────────────────────────────────────────────────────
+    let diagTarget=col;
+    if(type==='diagonal'){
+      const far=[0,1,2,3].filter(c=>c!==col&&Math.abs(c-col)>=2);
+      const near=[0,1,2,3].filter(c=>c!==col);
+      const pool=far.length?far:near;
+      diagTarget=pool[Math.floor(Math.random()*pool.length)];
+    }
+
+    // sliderSec: the musical note duration in seconds (for slider length)
+    const sliderSec = (type==='slider'||type==='diagonal')?(e.noteDuration||0):0;
+
+    out.push({
+      time:e.time, rest:false, type, col,
+      col2:type==='diagonal'?diagTarget:col2,
+      double:dbl, beat:e.beat, sliderSec
+    });
+    lastCol=col; prevType=type; prevDbl=dbl;
+  }
+  return out;
+}
 
 // ── BUILD PATTERN FROM ONSET DATA ─────────────────────────────────────────────
 // Approach: classify each beat position by musical content, then create
@@ -1315,9 +1597,11 @@ function adaptBeatmap(base, diff){
 
 // ── EVENT LISTENERS ───────────────────────────────────────────────────────
 wrap.addEventListener('touchstart',e=>{e.preventDefault();for(const t of e.changedTouches)onTap(t.clientX,t.clientY,t.identifier);},{passive:false});
+wrap.addEventListener('touchmove', e=>{e.preventDefault();for(const t of e.changedTouches)onTouchMove(t.clientX,t.clientY,t.identifier);},{passive:false});
 wrap.addEventListener('touchend',  e=>{e.preventDefault();for(const t of e.changedTouches)onTouchEnd(t.identifier);},{passive:false});
 wrap.addEventListener('touchcancel',e=>{for(const t of e.changedTouches)onTouchEnd(t.identifier);});
 wrap.addEventListener('mousedown',e=>{e.preventDefault();onTap(e.clientX,e.clientY,'__m__');});
+wrap.addEventListener('mousemove',e=>{if('__m__' in activeSliders)onTouchMove(e.clientX,e.clientY,'__m__');});
 wrap.addEventListener('mouseup',()=>{if('__m__' in activeSliders)onTouchEnd('__m__');});
 document.getElementById('start-btn').addEventListener('click',startGame);
 document.getElementById('retry-btn').addEventListener('click',()=>{if(!AC||AC.state==='closed')AC=null;startGame();});
@@ -1336,31 +1620,31 @@ document.querySelectorAll('.theme-btn').forEach(b=>{b.addEventListener('click',(
 
 // ── UI ────────────────────────────────────────────────────────────────────
 function buildUI(){
-  ALL_LEVELS=[...BUILTIN_LEVELS,...CUSTOM_LEVELS];
+  ALL_LEVELS=[...BUILTIN_LEVELS];
   buildAllCarousel();
 }
 
 function buildAllCarousel(){
   const c=document.getElementById('all-carousel');c.innerHTML='';
-  const addEl=document.createElement('div');
-  addEl.className='level-card add-card';
-  addEl.innerHTML=`<div class="add-icon">+</div><div class="add-card-lbl">Importer</div><input type="file" id="loc-audio" accept="audio/*,audio/mpeg,audio/mp3,audio/aac,audio/m4a,audio/x-m4a,.mp3,.m4a,.aac,.wav,.ogg,.flac">`;
-  c.appendChild(addEl);
-  document.getElementById('loc-audio').addEventListener('change',onAudioSelect);
-
+  if(!ALL_LEVELS.length){
+    const empty=document.createElement('div');
+    empty.style.cssText='padding:20px;color:rgba(255,255,255,.4);font-size:12px;text-align:center;';
+    empty.textContent='Lance analyze.py pour générer les beatmaps.';
+    c.appendChild(empty);
+    return;
+  }
   ALL_LEVELS.forEach((lv,idx)=>{
     const el=document.createElement('div');
     el.className='level-card'+(lv.id===currentLevel.id?' active':'');
     el.style.setProperty('--accent',lv.accent||'#06D6A0');
     const img=lv.cover?`<img src="${lv.cover}" class="lc-cover" alt="" onerror="this.outerHTML='<div class=\'lc-cover\'>🎵</div>'">`:`<div class="lc-cover">🎵</div>`;
     const bpmLabel=lv.bpm?` · ${lv.bpm} BPM`:'';
-    let delBtn=lv.custom?`<button class="del-btn">✕</button>`:'';
-    el.innerHTML=`${img}<div class="lc-info"><div class="lc-name">${lv.name}</div><div class="lc-sub">${lv.artist||''}${bpmLabel}</div></div>${delBtn}`;
-    if(lv.custom){el.querySelector('.del-btn').addEventListener('click',e=>{e.stopPropagation();const ci=CUSTOM_LEVELS.indexOf(lv);if(ci>=0)CUSTOM_LEVELS.splice(ci,1);if(currentLevel.id===lv.id)currentLevel=BUILTIN_LEVELS[0];buildUI();});}
+    el.innerHTML=`${img}<div class="lc-info"><div class="lc-name">${lv.name}</div><div class="lc-sub">${lv.artist||''}${bpmLabel}</div></div>`;
     el.addEventListener('click',()=>{currentLevel=lv;buildUI();});
     c.appendChild(el);
   });
-  initMagnetCarousel(c, ALL_LEVELS.findIndex(lv=>lv.id===currentLevel.id)+1);
+  const curIdx2 = currentLevel ? ALL_LEVELS.findIndex(lv=>lv.id===currentLevel.id) : 0;
+  initMagnetCarousel(c, Math.max(0, curIdx2));
 }
 
 function initMagnetCarousel(track, initIdx=0){
@@ -1376,7 +1660,7 @@ function initMagnetCarousel(track, initIdx=0){
     track.classList.add('animating');track.style.transform=`translateX(${curTx}px)`;
     setTimeout(()=>track.classList.remove('animating'),360);
     cards.forEach((c,j)=>c.classList.toggle('active',j===curIdx));
-    const lv=curIdx>0?ALL_LEVELS[curIdx-1]:null;if(lv)currentLevel=lv;
+    const lv=curIdx>=0&&curIdx<ALL_LEVELS.length?ALL_LEVELS[curIdx]:null;if(lv)currentLevel=lv;
   }
   track.style.transform=`translateX(${txFor(curIdx)}px)`;
   cards[curIdx]?.classList.add('active');
@@ -1391,66 +1675,13 @@ function initMagnetCarousel(track, initIdx=0){
   track.addEventListener('touchend',  e=>{e.stopPropagation();onEnd(e.changedTouches[0].clientX);},{passive:true});
 }
 
-// ── AUDIO IMPORT ─────────────────────────────────────────────────────────
-async function onAudioSelect(e){
-  if(!e.target.files.length)return;
-  const file=e.target.files[0];e.target.value='';
-  const nameRaw=file.name.replace(/\.[^/.]+$/,'');
-  document.getElementById('loc-title').value=nameRaw;
-  document.getElementById('loc-artist').value='';
-  document.getElementById('modal-save').disabled=true;
-  document.getElementById('modal-status').textContent='Décodage audio…';
-  document.getElementById('modal-status').className='modal-status';
-  setMProgress(5);
-  document.getElementById('add-modal').style.display='flex';
-  try{
-    const ab=await file.arrayBuffer();
-    tempAudioBuffer=await getAC().decodeAudioData(ab);
-    setMProgress(18);
-    document.getElementById('modal-status').textContent='Analyse BPM & rythme…';
-    const res=await analyseAudioInBrowser(tempAudioBuffer);
-    tempAudioBuffer._bpm=res.bpm;tempAudioBuffer._offset=res.offset;tempAudioBuffer._pattern=res.pattern;
-    setMProgress(90);
-    // Try to fetch cover art from musichoarders API
-    document.getElementById('modal-status').textContent='Recherche de la pochette…';
-    const titleVal=document.getElementById('loc-title').value;
-    let coverDataUrl=null;
-    try{
-      const q=encodeURIComponent(titleVal);
-      const resp=await fetch(`https://covers.musichoarders.xyz/api/search?q=${q}&limit=1`);
-      if(resp.ok){const data=await resp.json();if(data.results&&data.results[0]&&data.results[0].cover){
-        // Fetch image and convert to data URL
-        const imgResp=await fetch(data.results[0].cover);
-        if(imgResp.ok){const blob=await imgResp.blob();coverDataUrl=await new Promise(r=>{const reader=new FileReader();reader.onload=()=>r(reader.result);reader.readAsDataURL(blob);});}
-      }}
-    }catch(ce){/* cover fetch failed, continue without */}
-    setMProgress(100);
-    document.getElementById('modal-status').textContent=`✓ BPM: ${res.bpm} · ${res.pattern.filter(x=>!x.rest).length} notes`;
-    document.getElementById('modal-status').className='modal-status ok';
-    tempAudioBuffer._cover=coverDataUrl;
-    document.getElementById('modal-save').disabled=false;
-  }catch(err){
-    document.getElementById('modal-status').textContent='Erreur : fichier audio invalide.';
-    document.getElementById('modal-status').className='modal-status err';setMProgress(0);
-  }
-}
-function setMProgress(p){document.getElementById('modal-progress').style.width=p+'%';}
-document.getElementById('modal-cancel').addEventListener('click',()=>{document.getElementById('add-modal').style.display='none';tempAudioBuffer=null;setMProgress(0);});
-document.getElementById('modal-save').addEventListener('click',()=>{
-  if(!tempAudioBuffer)return;
-  const title=document.getElementById('loc-title').value||'Inconnu';
-  const artist=document.getElementById('loc-artist').value||'Importé';
-  const bpm=tempAudioBuffer._bpm||120;
-  const dc='#06D6A0';
-  const newLevel={id:'loc_'+Date.now(),name:title,artist,bpm,offset:tempAudioBuffer._offset||0,diffColor:dc,accent:dc,custom:true,audioBuffer:tempAudioBuffer,_basePattern:tempAudioBuffer._pattern,cover:tempAudioBuffer._cover||null};
-  CUSTOM_LEVELS.push(newLevel);currentLevel=newLevel;
-  document.getElementById('add-modal').style.display='none';tempAudioBuffer=null;setMProgress(0);
-  buildUI();
-});
-
 // ── INIT ──────────────────────────────────────────────────────────────────
 document.getElementById('best-display').textContent=bestScore;
-buildUI();
+// Discover levels dynamically from ./musiques/
+discoverLevels().then(()=>{
+  buildUI();
+  showLoading(false);
+}).catch(()=>{ buildUI(); showLoading(false); });
 if('serviceWorker' in navigator)window.addEventListener('load',()=>navigator.serviceWorker.register('./sw.js').catch(()=>{}));
 </script>
 </body>
